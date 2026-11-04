@@ -23,6 +23,7 @@ const sourceFiles = [
   "README.md",
   "background.js",
   "content.css",
+  "page-overlay.css",
   "content.js",
   "html2canvas.min.js",
   "inject.js",

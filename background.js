@@ -1170,6 +1170,7 @@ const DEFAULT_SETTINGS = {
     prefMode: "quality",
     pluginDisplayMode: "collapsed",
     pluginDisplayFeatureSeen: true,
+    pageOverlayEnabled: false,
     debugMode: false,
     sentryEnabled: true,
     sentryDsn: DEFAULT_SENTRY_DSN,

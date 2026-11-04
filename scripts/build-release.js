@@ -41,6 +41,7 @@ const files = [
   "background.js",
   "content.js",
   "content.css",
+  "page-overlay.css",
   "inject.js",
   "logger.js",
   "html2canvas.min.js",

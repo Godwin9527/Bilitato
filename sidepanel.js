@@ -47,7 +47,12 @@ const state = {
     summaryStreamDraft: null,
     summaryDraftExpiryTimer: null,
     summaryDraftExpiryAt: 0,
-    announcementsUnread: false
+    announcementsUnread: false,
+    announcements: [],
+    announcementsLoaded: false,
+    announcementSelectedKey: "",
+    guideStep: 1,
+    returnPage: ""
 };
 
 const app = document.getElementById("app");
@@ -414,31 +419,13 @@ async function contentAction(command, extra = {}) {
     return result;
 }
 
-async function setEmbeddedVisibleForTab(tabId, visible) {
-    const id = Number(tabId || 0);
-    if (!id) return;
-    await chrome.tabs.sendMessage(id, {
-        action: "SIDE_PANEL_CONTENT_ACTION",
-        command: "set-embedded-visible",
-        visible: visible !== false
-    }).catch(() => {});
-}
+// 页面内面板已停用，侧边栏与页面不再需要互斥显示，相关同步一律空转
+async function setEmbeddedVisibleForTab() {}
 
-async function hideEmbeddedForActiveTab(tabId) {
-    if (state.switchingToEmbedded) return;
-    const id = Number(tabId || 0);
-    if (!id) return;
-    if (state.hiddenEmbeddedTabId && state.hiddenEmbeddedTabId !== id) {
-        await setEmbeddedVisibleForTab(state.hiddenEmbeddedTabId, true);
-    }
-    await setEmbeddedVisibleForTab(id, false);
-    state.hiddenEmbeddedTabId = id;
-}
+async function hideEmbeddedForActiveTab() {}
 
 async function restoreHiddenEmbedded() {
-    const id = Number(state.hiddenEmbeddedTabId || 0);
     state.hiddenEmbeddedTabId = 0;
-    if (id) await setEmbeddedVisibleForTab(id, true);
 }
 
 function showToast(text) {
@@ -454,7 +441,6 @@ function navButton(id, file, label) {
     const active = state.activePage === id;
     const src = `${UI_BASE}/${active ? "active" : "default"}/${file}`;
     const showSettingsDot = Number(state.feedback?.unreadCount || 0) > 0
-        || state.settings?.pluginDisplayFeatureSeen === false
         || state.announcementsUnread;
     const dot = id === "settings" && showSettingsDot ? `<span class="nav-red-dot"></span>` : "";
     return `<button class="side-nav-item ${active ? "active" : ""}" data-nav="${id}" data-id="${id}" data-tooltip="${escapeHtml(label)}" data-tooltip-placement="right" aria-label="${escapeHtml(label)}"><img class="loaded" src="${src}" alt="">${dot}</button>`;
@@ -708,9 +694,6 @@ function renderShell(content) {
                             <img src="assets/ui/default/usage.png" alt="">
                         </button>
                     </div>
-                    <button class="header-icon-btn side-mode-btn" data-action="switch-to-embedded" data-tooltip="切换回内嵌插件" data-tooltip-placement="bottom" aria-label="切换回内嵌插件">
-                        <img src="assets/ui/active/sidebar.png" alt="">
-                    </button>
                 </div>
             </header>
             <div class="plugin-main-container">
@@ -1139,7 +1122,9 @@ function renderSettings() {
             </div>
             <div class="settings-group">
                 <div class="settings-group-title">调用与显示</div>
-                <div class="field"><label class="settings-feature-label">插件显示${settings.pluginDisplayFeatureSeen === false ? '<span class="settings-feature-dot plugin-display-feature-dot" aria-label="新增功能"></span>' : ""}</label><select id="setting-plugin-display-mode"><option value="expanded" ${settings.pluginDisplayMode !== "collapsed" ? "selected" : ""}>默认展开</option><option value="collapsed" ${settings.pluginDisplayMode === "collapsed" ? "selected" : ""}>默认缩起</option></select></div>
+                <div class="settings-check-grid">
+                    <label class="settings-check-row"><input id="setting-page-overlay" type="checkbox" ${settings.pageOverlayEnabled ? "checked" : ""}><span>页面内辅助显示（进度条章节标记，默认关闭以保持页面干净）</span></label>
+                </div>
                 <div class="field"><label>深/浅模式</label><select id="setting-theme-mode"><option value="system" ${settings.themeMode !== "light" && settings.themeMode !== "dark" ? "selected" : ""}>跟随系统</option><option value="light" ${settings.themeMode === "light" ? "selected" : ""}>浅色模式</option><option value="dark" ${settings.themeMode === "dark" ? "selected" : ""}>深色模式</option></select></div>
                 <div class="field"><label>默认页面</label><select id="setting-default-page">${["CC", "summary", "chat", "real"].map((key) => `<option value="${key}" ${settings.defaultOpenPage === key ? "selected" : ""}>${{CC:"字幕",summary:"总结",chat:"聊天",real:"验真"}[key]}</option>`).join("")}</select></div>
                 <div class="field"><label>调用模式</label><select id="setting-pref-mode"><option value="quality" ${settings.prefMode !== "efficiency" ? "selected" : ""}>高速模式</option><option value="efficiency" ${settings.prefMode === "efficiency" ? "selected" : ""}>省流模式</option></select></div>
@@ -1181,6 +1166,125 @@ function renderSettings() {
                     <label class="feedback-check"><input id="feedback-include-logs" type="checkbox" ${feedbackDraft.includeLogs ? "checked" : ""}><span>默认附带异常日志，便于定位问题</span></label>
                     <button class="feedback-submit-btn" data-action="submit-feedback">提交反馈</button>
                     <div class="feedback-list">${feedbackHtml || `<div class="feedback-empty">暂无反馈记录。</div>`}</div>
+                </div>
+            </div>
+        </div></div>
+    </section>`;
+}
+
+async function loadAnnouncementsForPage({ force = false } = {}) {
+    try {
+        const response = await chrome.runtime.sendMessage({ action: "GET_ANNOUNCEMENTS", force });
+        const rows = Array.isArray(response?.announcements?.rows) ? response.announcements.rows : [];
+        state.announcements = rows;
+        state.announcementsLoaded = true;
+        const dismissed = rows.length
+            ? await chrome.storage.local.get(rows.map((item) => getAnnouncementDismissedStorageKey(item.key)))
+            : {};
+        state.announcementsUnread = rows.some((item) => dismissed?.[getAnnouncementDismissedStorageKey(item.key)] !== true);
+    } catch (_) {
+        state.announcementsLoaded = true;
+    }
+    render();
+}
+
+async function markAnnouncementsRead(keys = []) {
+    const payload = {};
+    keys.filter(Boolean).forEach((key) => {
+        payload[getAnnouncementDismissedStorageKey(key)] = true;
+    });
+    if (Object.keys(payload).length) await chrome.storage.local.set(payload);
+    state.announcementsUnread = false;
+    document.querySelector('.side-nav-item[data-id="settings"] .nav-red-dot')?.remove();
+}
+
+function formatAnnouncementDate(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const date = new Date(text);
+    if (Number.isNaN(date.getTime())) return "";
+    const pad = (num) => String(num).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function renderAnnouncementsPage() {
+    const rows = Array.isArray(state.announcements) ? state.announcements : [];
+    const selected = state.announcementSelectedKey
+        ? rows.find((item) => item.key === state.announcementSelectedKey)
+        : null;
+    if (selected) {
+        return `<section class="page">
+            <div class="page-header">
+                <button class="btn secondary" data-action="announcement-back">← 返回列表</button>
+                <h2>公告详情</h2>
+            </div>
+            <div class="page-body"><div class="section">
+                <div class="section-title">${escapeHtml(selected.title)}</div>
+                <div class="segment-desc">${escapeHtml(selected.content)}</div>
+                ${selected.linkUrl ? `<div class="settings-action-row"><button class="btn" data-action="open-external-url" data-url="${escapeHtml(selected.linkUrl)}">${escapeHtml(selected.linkLabel || "查看详情")}</button></div>` : ""}
+                <div class="segment-desc">${escapeHtml(formatAnnouncementDate(selected.publishedAt || selected.updatedAt))}</div>
+            </div></div>
+        </section>`;
+    }
+    const listHtml = rows.length
+        ? rows.map((item) => `
+            <div class="segment announcement-item" data-action="announcement-select" data-key="${escapeHtml(item.key)}">
+                <div class="segment-head">
+                    <div class="segment-title">${escapeHtml(item.title)}</div>
+                    <div class="segment-desc">${escapeHtml(formatAnnouncementDate(item.publishedAt || item.updatedAt))}</div>
+                </div>
+                <div class="segment-desc">${escapeHtml(item.summary || "")}</div>
+            </div>`).join("")
+        : `<div class="empty">${state.announcementsLoaded ? "暂无公告" : "公告加载中…"}</div>`;
+    return `<section class="page">
+        <div class="page-header">
+            <button class="btn secondary" data-action="close-overlay-page">← 返回</button>
+            <h2>公告中心</h2>
+        </div>
+        <div class="page-body"><div class="section"><div class="segment-list">${listHtml}</div></div></div>
+    </section>`;
+}
+
+const SETUP_GUIDE_DOC_URL = "https://ncnp7ti79hnh.feishu.cn/wiki/AMVswpIdZiufLukZ3x0cMTWJnge#share-JpZDddCK5oZWcyxlbJJcijLBnIe";
+const SETUP_PREVIEW_VIDEO_URL = "https://www.bilibili.com/video/BV1ojfDBSEPv/";
+const SETUP_PREVIEW_BVID = "BV1ojfDBSEPv";
+
+function renderSetupGuide() {
+    const step = Math.max(1, Math.min(4, Number(state.guideStep) || 1));
+    const dots = Array.from({ length: 4 }, (_, index) => `<span class="guide-dot ${index + 1 === step ? "active" : ""}"></span>`).join("");
+    const bodies = {
+        1: {
+            title: "🔗 第一步：注册并获取 API Key",
+            desc: `点击设置页的「注册」按钮跳转到平台申请免费 Key。<br>不确定怎么操作？<a class="guide-doc-link" href="${SETUP_GUIDE_DOC_URL}" target="_blank" rel="noopener noreferrer">📖 5 分钟学会如何配置</a>`
+        },
+        2: {
+            title: "✏️ 第二步：填写 Key 和模型名",
+            desc: "把 API Key 填进设置页的输入框，模型名可留空使用默认模型。填写后点「保存设置」，AI 功能即刻解锁。"
+        },
+        3: {
+            title: "👀 第三步：先看看效果",
+            desc: "还没配置也没关系，这里有一个已生成云端缓存的视频，点开即可看到总结效果。"
+        },
+        4: {
+            title: "Tips：入口都在这儿",
+            desc: "Bilitato 不再往页面里塞任何面板。需要字幕、总结、聊天时，点击浏览器工具栏的 Bilitato 图标就能唤起侧边栏。"
+        }
+    };
+    const body = bodies[step] || bodies[1];
+    return `<section class="page">
+        <div class="page-header">
+            <button class="btn secondary" data-action="close-overlay-page">← 返回</button>
+            <h2>使用引导</h2>
+        </div>
+        <div class="page-body"><div class="section">
+            <div class="guide-steps-dots">${dots}</div>
+            <div class="guide-card-title">${body.title}</div>
+            <div class="guide-card-desc">${body.desc}</div>
+            <div class="guide-card-actions">
+                <div class="guide-btn-group">
+                    ${step > 1 ? '<button class="btn secondary" data-action="guide-prev">← 上一步</button>' : ""}
+                    ${step === 3 ? '<button class="btn" data-action="guide-preview">预览总结效果</button>' : ""}
+                    <button class="btn" data-action="guide-next">${step === 4 ? "完成 ✓" : "下一步 →"}</button>
                 </div>
             </div>
         </div></div>
@@ -1246,12 +1350,14 @@ function render() {
     const selectionStart = document.activeElement?.selectionStart;
     const selectionEnd = document.activeElement?.selectionEnd;
     let content;
-    if (!state.tabId) {
+    if (state.activePage === "announcements") content = renderAnnouncementsPage();
+    else if (state.activePage === "setup") content = renderSetupGuide();
+    else if (state.activePage === "settings") content = renderSettings();
+    else if (!state.tabId) {
         content = `<section class="page"><div class="empty">${escapeHtml(state.error || "请打开 B 站视频")}</div></section>`;
     } else if (state.activePage === "summary") content = renderSummary();
     else if (state.activePage === "chat") content = renderChat();
     else if (state.activePage === "real") content = renderReal();
-    else if (state.activePage === "settings") content = renderSettings();
     else if (state.activePage === "copy") content = renderCopy();
     else if (state.activePage === "export") content = renderExport();
     else content = renderCC();
@@ -1573,7 +1679,9 @@ async function saveSettings({ silent = false, requestGroqPermission = false } = 
         themeMode: document.getElementById("setting-theme-mode")?.value || "system",
         prefMode: document.getElementById("setting-pref-mode")?.value || "quality",
         defaultOpenPage: document.getElementById("setting-default-page")?.value || "CC",
-        pluginDisplayMode: document.getElementById("setting-plugin-display-mode")?.value === "collapsed" ? "collapsed" : "expanded",
+        // 页面内面板已停用，保留旧设置值不再暴露入口
+        pluginDisplayMode: current.pluginDisplayMode === "collapsed" ? "collapsed" : "expanded",
+        pageOverlayEnabled: document.getElementById("setting-page-overlay")?.checked === true,
         sentryEnabled: document.getElementById("setting-sentry")?.value === "true",
         disableCloudCacheRead: document.getElementById("setting-disable-cloud-all")?.checked === true,
         promptSettings: {
@@ -1622,23 +1730,24 @@ function scheduleSettingsSave() {
     }, 500);
 }
 
+function openOverlayPage(page) {
+    if (state.activePage !== "announcements" && state.activePage !== "setup") {
+        state.returnPage = state.activePage;
+    }
+    state.activePage = page;
+}
+
+function closeOverlayPage() {
+    const allowed = ["CC", "summary", "chat", "real", "settings", "copy", "export"];
+    state.activePage = allowed.includes(state.returnPage) ? state.returnPage : "settings";
+    state.announcementSelectedKey = "";
+    state.guideStep = 1;
+    render();
+}
+
 async function handleAction(actionNode) {
     const action = actionNode.dataset.action;
     if (action === "refresh") return refreshState({ hydrate: true });
-    if (action === "switch-to-embedded") {
-        state.switchingToEmbedded = true;
-        const targetTabId = state.tabId || state.hiddenEmbeddedTabId;
-        try {
-            if (targetTabId) await setEmbeddedVisibleForTab(targetTabId, true);
-            if (state.tabId) await contentAction("switch-to-embedded");
-            state.hiddenEmbeddedTabId = 0;
-            setTimeout(() => window.close(), 80);
-        } catch (error) {
-            state.switchingToEmbedded = false;
-            throw error;
-        }
-        return;
-    }
     if (action === "seek") return contentAction("seek", { time: Number(actionNode.dataset.time || 0) });
     if (action === "follow-now") {
         state.followEnabled = true;
@@ -1797,14 +1906,54 @@ async function handleAction(actionNode) {
         return;
     }
     if (action === "open-setup-guide") {
-        await contentAction("open-setup-guide");
-        window.close();
+        openOverlayPage("setup");
+        state.guideStep = 1;
+        render();
         return;
     }
     if (action === "open-announcements") {
-        await contentAction("open-announcements");
-        state.announcementsUnread = false;
-        window.close();
+        openOverlayPage("announcements");
+        state.announcementSelectedKey = "";
+        render();
+        loadAnnouncementsForPage({ force: true }).catch(() => {});
+        return;
+    }
+    if (action === "guide-prev") {
+        state.guideStep = Math.max(1, (Number(state.guideStep) || 1) - 1);
+        render();
+        return;
+    }
+    if (action === "guide-next") {
+        const next = (Number(state.guideStep) || 1) + 1;
+        if (next > 4) {
+            closeOverlayPage();
+            return;
+        }
+        state.guideStep = next;
+        render();
+        return;
+    }
+    if (action === "guide-preview") {
+        await chrome.storage.local.set({
+            setupGuidePreviewTarget: { bvid: SETUP_PREVIEW_BVID, page: "summary", createdAt: Date.now() }
+        }).catch(() => {});
+        await chrome.tabs.create({ url: SETUP_PREVIEW_VIDEO_URL });
+        return;
+    }
+    if (action === "announcement-select") {
+        const key = String(actionNode.dataset.key || "").trim();
+        state.announcementSelectedKey = key;
+        render();
+        markAnnouncementsRead([key]).catch(() => {});
+        return;
+    }
+    if (action === "announcement-back") {
+        state.announcementSelectedKey = "";
+        render();
+        return;
+    }
+    if (action === "close-overlay-page") {
+        closeOverlayPage();
         return;
     }
     if (action === "goto-setup-guide") {

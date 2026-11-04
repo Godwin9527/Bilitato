@@ -343,6 +343,19 @@ const SETUP_PREVIEW_BVID = normalizeBvidCase(getBvidFromUrl?.(SETUP_PREVIEW_VIDE
 const SETUP_PREVIEW_STORAGE_KEY = "setupGuidePreviewTarget";
 const SETUP_PREVIEW_MAX_AGE_MS = 10 * 60 * 1000;
 
+// 页面注入式面板总开关：本分支起默认关闭，全部功能改由浏览器侧边栏承载。
+// 保留融合型 UI 的渲染代码，仅通过熔断停止执行，便于随时回退。
+const PAGE_EMBEDDED_PANEL_DISABLED = true;
+
+function isPagePanelEnabled() {
+    return !PAGE_EMBEDDED_PANEL_DISABLED;
+}
+
+// 页面内辅助显示（分段浮窗、进度条章节标记）：默认关闭，可在侧边栏设置中开启
+function isPageOverlayEnabled() {
+    return !!appState?.settings?.pageOverlayEnabled;
+}
+
 function isDebugLoggingEnabled() {
     return !!(IS_DEBUG_MODE || appState?.settings?.debugMode);
 }
@@ -1969,6 +1982,7 @@ bootstrap();
 
 
 async function bootstrap() {
+    globalThis.BilitatoContentUi?.setToastEnabled?.(isPagePanelEnabled());
     injectScriptBridge();
     scheduleInjectRetry();
     window.addEventListener("message", onInjectMessage, false);
@@ -1994,6 +2008,7 @@ async function bootstrap() {
     beginSubtitleObservation(appState.injectBvid);
     startSubtitleCheckTimer();
     await syncCacheFromBackground(getBvidFromUrl(location.href) || appState.tabState?.activeBvid);
+    syncPageOverlayBySettings();
     evaluateSubtitleFallback();
     setInterval(evaluateSubtitleFallback, 3500);
     renderApp();
@@ -2315,6 +2330,33 @@ function handleSummaryDraftStorageChanges(changes = {}) {
     return keys.length === Object.keys(changes || {}).length;
 }
 
+// 依据设置同步页面内辅助显示的显示/隐藏
+function syncPageOverlayStyles(enabled) {
+    const existing = document.getElementById("bilitato-page-overlay-style");
+    if (!enabled) {
+        if (existing) existing.remove();
+        return;
+    }
+    if (existing) return;
+    const link = document.createElement("link");
+    link.id = "bilitato-page-overlay-style";
+    link.rel = "stylesheet";
+    link.href = chrome.runtime.getURL("page-overlay.css");
+    (document.head || document.documentElement).appendChild(link);
+}
+
+function syncPageOverlayBySettings() {
+    const enabled = isPageOverlayEnabled();
+    syncPageOverlayStyles(enabled);
+    if (!enabled) {
+        removeSegmentsFloatWindow();
+        removeSegmentsProgressMarkers();
+        return;
+    }
+    renderSegmentsFloatWindow();
+    renderSegmentsProgressMarkers();
+}
+
 function onStorageChanged(changes, areaName) {
     if (areaName !== "local") return;
     if (handleSummaryDraftStorageChanges(changes)) return;
@@ -2347,6 +2389,7 @@ function onStorageChanged(changes, areaName) {
         if (previousDisplayMode !== resolvePluginDisplayMode(appState.settings)) {
             resetPanelCollapseForCurrentPart();
         }
+        syncPageOverlayBySettings();
     }
     if (changes.cloudReadDisabledBvids) {
         const target = normalizeBvidCase(resolveCurrentBvid() || appState.cache?.bvid || "");
@@ -2485,6 +2528,7 @@ function getPanelRoot() {
 }
 
 async function waitPanelMount() {
+    if (!isPagePanelEnabled()) return;
     // 等页面完全加载完毕再动 DOM
     if (document.readyState !== "complete") {
         await new Promise(resolve => window.addEventListener("load", resolve, { once: true }));
@@ -3202,6 +3246,7 @@ window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change"
 });
 
 function renderApp() {
+    if (!isPagePanelEnabled()) return;
     bindPanelDelegatedEvents();
     applyThemeMode();
     renderTopAnnouncement();
@@ -3953,6 +3998,7 @@ function setNavActionActive(navId, durationMs) {
 }
 
 function renderNav() {
+    if (!isPagePanelEnabled()) return;
     if (!panelShadowRoot) return;
     const top = panelShadowRoot.getElementById("nav-top");
     const bottom = panelShadowRoot.getElementById("nav-bottom");
@@ -4057,6 +4103,7 @@ function renderNav() {
 }
 
 function renderContent() {
+    if (!isPagePanelEnabled()) return;
     const panel = panelShadowRoot ? panelShadowRoot.getElementById("panel-body") : null;
     if (!panel) return;
     if (appState.activePage !== "debug") stopRealtimeLogPolling();
@@ -8858,7 +8905,9 @@ function normalizeHttpsBaseUrlInput(value) {
 function startFocusTicker() {
     if (appState.focusTickerTimer) return;
     appState.focusTickerTimer = setInterval(() => {
-        if (appState.activePage === "CC") scrollToCurrentSubtitle(false);
+        // 页面面板已停用，跟随滚动与章节标记只在显式开启页面辅助时运行
+        if (!isPageOverlayEnabled()) return;
+        if (isPagePanelEnabled() && appState.activePage === "CC") scrollToCurrentSubtitle(false);
         if (Date.now() - Number(appState.segmentsMarkerTickAt || 0) >= 1000) {
             appState.segmentsMarkerTickAt = Date.now();
             renderSegmentsProgressMarkers();
@@ -9152,6 +9201,10 @@ function removeSegmentsFloatWindow() {
 }
 
 function renderSegmentsFloatWindow() {
+    if (!isPageOverlayEnabled()) {
+        removeSegmentsFloatWindow();
+        return;
+    }
     const segments = getSegmentsForFloatWindow();
     if (!segments.length) {
         removeSegmentsFloatWindow();
@@ -9272,6 +9325,10 @@ function removeSegmentsProgressMarkers() {
 }
 
 function renderSegmentsProgressMarkers() {
+    if (!isPageOverlayEnabled()) {
+        removeSegmentsProgressMarkers();
+        return;
+    }
     const segments = getSegmentsForFloatWindow();
     if (!segments.length) {
         removeSegmentsProgressMarkers();
@@ -10652,6 +10709,8 @@ function insertTextIntoControl(input, text) {
 }
 
 function onGlobalShortcut(event) {
+    // 页面内日志窗口随面板 UI 一并停用，避免抢占页面快捷键
+    if (!isPagePanelEnabled()) return;
     if (!event.ctrlKey || !event.shiftKey || String(event.key).toLowerCase() !== "l") return;
     event.preventDefault();
     if (logWindowVisible) {
@@ -11653,15 +11712,8 @@ function onSidePanelMessage(message, sender, sendResponse) {
             await openAnnouncementCenter({ forceRefresh: true });
             return {};
         }
-        if (command === "switch-to-embedded") {
-            setEmbeddedPanelVisible(true);
-            const root = document.getElementById("__bili_ai_plugin_root__");
-            root?.scrollIntoView({ behavior: "smooth", block: "start" });
-            return {};
-        }
-        if (command === "set-embedded-visible") {
-            setEmbeddedPanelVisible(message?.visible !== false);
-            return {};
+        if (command === "switch-to-embedded" || command === "set-embedded-visible") {
+            throw new Error("页面内面板已停用，请在侧边栏中查看");
         }
         if (command === "get-playback-state") {
             const video = document.querySelector("video");

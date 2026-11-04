@@ -17,7 +17,23 @@
         }, 1000);
     }
 
+    // 页面内 toast 默认关闭：页面不再承载任何可见 UI，操作反馈统一走侧边栏
+    let toastEnabled = true;
+
+    function removeToast() {
+        const toast = document.querySelector(".plugin-toast");
+        if (!toast) return;
+        if (toast._hideTimer) clearTimeout(toast._hideTimer);
+        toast.remove();
+    }
+
+    function setToastEnabled(value) {
+        toastEnabled = value !== false;
+        if (!toastEnabled) removeToast();
+    }
+
     function showToast(text, options = {}) {
+        if (!toastEnabled) return;
         let toast = document.querySelector(".plugin-toast");
         if (!toast) {
             toast = document.createElement("div");
@@ -37,6 +53,7 @@
     globalThis.BilitatoContentUi = {
         flashButtonState,
         renderSkeletonLines,
+        setToastEnabled,
         showToast
     };
 })();

@@ -2346,3 +2346,49 @@ button {
     border-color: rgba(255, 128, 128, 0.45);
     background: rgba(255, 128, 128, 0.12);
 }
+
+/* 侧边栏内公告中心（原页面弹窗迁移而来） */
+.announcement-item {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.announcement-item:hover {
+    border-color: rgba(251, 114, 153, 0.5);
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .announcement-item {
+    background: #24272e;
+    border-color: #333944;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .announcement-item .segment-title {
+    color: #e6e9ef;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .announcement-item .segment-desc {
+    color: #a4acb9;
+}
+
+/* 侧边栏内使用引导 */
+.ai-summary-plugin-box[data-theme="dark"] .guide-card-title {
+    color: #e6e9ef;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .guide-card-desc {
+    color: #a4acb9;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .guide-dot {
+    background: #3a4150;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .guide-dot.active {
+    background: #fb7299;
+}

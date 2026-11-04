@@ -66,19 +66,21 @@ describe("native side panel", () => {
     expect(sidepanel).toContain('action: "SAVE_SETTINGS"');
   });
 
-  it("hides embedded UI while the native side panel is open", () => {
-    expect(content).toContain('command === "set-embedded-visible"');
-    expect(content).toContain("function setEmbeddedPanelVisible");
-    expect(sidepanel).toContain("hideEmbeddedForActiveTab");
-    expect(sidepanel).toContain("restoreHiddenEmbedded");
-    expect(sidepanel).toContain("switchingToEmbedded");
-    expect(sidepanel).toContain("if (!state.switchingToEmbedded)");
-    expect(sidepanel).toContain('command: "set-embedded-visible"');
-    expect(sidepanel).toContain('window.addEventListener("pagehide"');
+  it("keeps the page free of injected UI and routes everything to the side panel", () => {
+    expect(content).toContain("const PAGE_EMBEDDED_PANEL_DISABLED = true");
+    expect(content).toContain("function isPagePanelEnabled()");
+    expect(content).toContain("if (!isPagePanelEnabled()) return;");
+    expect(content).toContain("function isPageOverlayEnabled()");
+    expect(content).toContain("function syncPageOverlayStyles(");
+    expect(manifest.content_scripts[0].css).toBeUndefined();
+    expect(manifest.side_panel.default_path).toBe("sidepanel.html");
+    expect(background).toContain("openPanelOnActionClick: true");
+    expect(sidepanel).not.toContain('data-action="switch-to-embedded"');
+    expect(sidepanel).not.toContain('command: "set-embedded-visible"');
   });
 
   it("checks database driven update availability without frequent polling", () => {
-    expect(manifest.version).toBe("1.6.4.1");
+    expect(manifest.version).toBe("1.6.4.2");
     expect(background).toContain('msg.action === "CHECK_LATEST_VERSION"');
     expect(background).toContain('msg.action === "OPEN_EXTENSION_MANAGEMENT"');
     expect(background).toContain("VERSION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000");
@@ -509,7 +511,9 @@ describe("native side panel", () => {
     expect(sidepanel).toContain('data-action="open-setup-guide"');
     expect(sidepanel).toContain('data-action="open-register"');
     expect(sidepanel).toContain('class="feedback-card"');
-    expect(sidepanel).toContain('data-action="switch-to-embedded"');
+    expect(sidepanel).not.toContain('data-action="switch-to-embedded"');
+    expect(sidepanel).toContain('data-action="announcement-select"');
+    expect(sidepanel).toContain('data-action="guide-next"');
     expect(sidepanel).toContain("state.settingsScrollTop");
     expect(sidepanel).toContain("state.chatDraft");
     expect(sidepanel).toContain("官方AI字幕");
@@ -531,7 +535,6 @@ describe("native side panel", () => {
     expect(sidepanel).toContain("hasTaskContent");
     expect(sidepanel).toContain("chatWasAtBottom");
     expect(sidepanel).toContain('taskStatus("segments") === "processing"');
-    expect(sidepanel).toContain('data-tooltip="切换回内嵌插件"');
     expect(sidepanel).toContain("showUiTooltip");
     expect(sidepanelCss).toContain(".side-ui-tooltip::before");
     expect(sidepanel).toContain('class="ad-tag"');
@@ -649,15 +652,16 @@ describe("native side panel", () => {
     expect(background).toContain("background_context:");
   });
 
-  it("supports a default-collapsed embedded panel that expands after summary success", () => {
+  it("exposes the page overlay toggle instead of the embedded panel display mode", () => {
     expect(background).toContain('pluginDisplayMode: "collapsed"');
     expect(background).toContain("pluginDisplayFeatureSeen: true");
     expect(background).toContain('Object.prototype.hasOwnProperty.call(base, "pluginDisplayFeatureSeen")');
     expect(background).toContain('Object.keys(base).length > 0 ? "expanded"');
+    expect(background).toContain("pageOverlayEnabled: false");
     expect(content).toContain('renderCustomSelect("settings-plugin-display-mode"');
-    expect(sidepanel).toContain('id="setting-plugin-display-mode"');
+    expect(sidepanel).toContain('id="setting-page-overlay"');
     expect(content).toContain('class="settings-feature-label">插件显示');
-    expect(sidepanel).toContain('class="settings-feature-label">插件显示');
+    expect(sidepanel).not.toContain('id="setting-plugin-display-mode"');
     expect(content).not.toContain("插件显示区域");
     expect(sidepanel).not.toContain("插件显示区域");
     expect(content.indexOf('class="settings-feature-label">插件显示')).toBeLessThan(content.indexOf("<label>深/浅模式</label>"));
@@ -698,7 +702,6 @@ describe("native side panel", () => {
     expect(content).toContain("shouldShowPluginDisplayFeatureDot()");
     expect(content).toContain("markPluginDisplayFeatureSeen()");
     expect(content).toContain('class="settings-feature-dot plugin-display-feature-dot"');
-    expect(sidepanel).toContain("state.settings?.pluginDisplayFeatureSeen === false");
     expect(sidepanel).toContain('select.id === "setting-plugin-display-mode"');
     expect(sidepanel).toContain("function markPluginDisplayFeatureSeen()");
     expect(sidepanelCss).toContain(".settings-feature-dot");
