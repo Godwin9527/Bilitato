@@ -52,7 +52,9 @@ const state = {
     announcementsLoaded: false,
     announcementSelectedKey: "",
     guideStep: 1,
-    returnPage: ""
+    returnPage: "",
+    prevSegmentsStatus: "",
+    segmentsUnseen: false
 };
 
 const app = document.getElementById("app");
@@ -371,7 +373,21 @@ async function refreshState({ quiet = false, hydrate = false, refreshFeedback = 
         state.subtitleOptions = Array.isArray(subtitleOptionState?.options) ? subtitleOptionState.options : [];
         state.activeSubtitleId = String(subtitleOptionState?.activeId || state.cache?.subtitleLanguage || "");
         state.feedback = result.feedback || null;
-        state.error = "";
+        // 分段是整包返回的，生成过程中页面上不会有任何变化。
+        // 这里在"生成中 → 完成"的瞬间做两件事：正在总结页就自动滚到分段区，不在就打个导航红点。
+        const segmentsStatusNow = String(result.tabState?.taskStatus?.segments || "idle");
+        if (state.prevSegmentsStatus === "processing" && segmentsStatusNow === "done") {
+            if (state.activePage === "summary") state.pendingSegmentsScroll = true;
+            else state.segmentsUnseen = true;
+        }
+        state.prevSegmentsStatus = segmentsStatusNow;
+        // 轮询不能无条件抹掉错误：原来的写法会让聊天 / 总结失败信息最多显示 1.5 秒。
+        // 只有相关任务不再处于失败态、且没有正在进行的聊天流时，才清掉顶部错误。
+        const hasTaskFailure = ["summary", "segments", "rumors", "chat"].some((task) => {
+            const status = String(result.tabState?.taskStatus?.[task] || "");
+            return status === "error" || status === "timeout";
+        });
+        if (!hasTaskFailure && !state.chatStreaming) state.error = "";
         const nextSignature = JSON.stringify({
             tabId: state.tabId,
             tabState: state.tabState,
@@ -442,7 +458,10 @@ function navButton(id, file, label) {
     const src = `${UI_BASE}/${active ? "active" : "default"}/${file}`;
     const showSettingsDot = Number(state.feedback?.unreadCount || 0) > 0
         || state.announcementsUnread;
-    const dot = id === "settings" && showSettingsDot ? `<span class="nav-red-dot"></span>` : "";
+    const showSummaryDot = !!state.segmentsUnseen && id === "summary";
+    const dot = (id === "settings" && showSettingsDot) || showSummaryDot
+        ? `<span class="nav-red-dot"></span>`
+        : "";
     return `<button class="side-nav-item ${active ? "active" : ""}" data-nav="${id}" data-id="${id}" data-tooltip="${escapeHtml(label)}" data-tooltip-placement="right" aria-label="${escapeHtml(label)}"><img class="loaded" src="${src}" alt="">${dot}</button>`;
 }
 
@@ -901,7 +920,7 @@ function renderSummary() {
                 </div>
                 <div class="summary-resize-divider"></div>
                 <div class="summary-card-segments">
-                    <div class="segments-section-header"><span class="segments-section-title">视频分段</span>${segments.length ? `<button class="segments-toggle-btn ${state.segmentsExpanded ? "is-expanded" : ""}" data-action="toggle-segments">${state.segmentsExpanded ? "收起" : "展开"}⌄</button>` : ""}</div>
+                    <div class="segments-section-header"><span class="segments-section-title">视频分段</span><span class="segments-status-badge ${segments.length ? "" : "is-loading"}">${segments.length ? `${segments.length} 段` : (taskStatus("segments") === "processing" ? "生成中…" : "未生成")}</span>${segments.length ? `<button class="segments-toggle-btn ${state.segmentsExpanded ? "is-expanded" : ""}" data-action="toggle-segments">${state.segmentsExpanded ? "收起" : "展开"}⌄</button>` : ""}</div>
                     <div class="segments-body"><div class="segment-list">${segmentHtml || (taskStatus("segments") === "processing" ? skeletonHtml(5) : `<div class="empty-text">尚未生成分段</div>`)}</div></div>
                 </div>
             </div>
@@ -940,12 +959,18 @@ function renderChat() {
             <button type="button" class="chat-suggest-link" data-action="chat-suggest" data-text="帮我翻译成英文稿">帮我翻译成英文稿</button>
             <button type="button" class="chat-suggest-link" data-action="chat-suggest" data-text="这个视频片段出自哪里？">这个视频片段出自哪里？</button>
         </div>`;
+    const streamingHint = state.chatStreaming?.queued
+        ? `<div class="chat-stream-hint">正在等待前面的请求完成${Number(state.chatStreaming.queuePosition || 0) > 0 ? `（第 ${Number(state.chatStreaming.queuePosition)} 位）` : ""}…</div>`
+        : (state.chatStreaming && !String(state.chatStreaming.answer || "").trim()
+            ? `<div class="chat-stream-hint">正在思考…</div>`
+            : "");
     return `<section class="page chat-page-shell">
         <div class="page-header"><h2>聊天</h2></div>
         ${statusHtml()}
         <section class="chat-page">
             ${guide}
             <div class="chat-display-area">${rows}</div>
+            ${streamingHint}
             <div class="chat-footer">
                 <div class="chat-input-wrap">
                     <textarea id="chat-input" placeholder="有咩想问的？">${escapeHtml(state.chatDraft)}</textarea>
@@ -1374,6 +1399,16 @@ function render() {
         if (summaryResult) summaryResult.scrollTop = summaryWasAtBottom ? summaryResult.scrollHeight : summaryScrollTop;
         const segmentsBody = document.querySelector(".segments-body");
         if (segmentsBody) segmentsBody.scrollTop = segmentsScrollTop;
+        if (state.pendingSegmentsScroll) {
+            state.pendingSegmentsScroll = false;
+            const header = document.querySelector(".segments-section-header");
+            if (header) {
+                header.scrollIntoView({ block: "nearest", behavior: "smooth" });
+                const body = document.querySelector(".segments-body");
+                if (body) body.scrollTop = 0;
+            }
+        }
+        if (state.activePage === "summary") state.segmentsUnseen = false;
         if (!focusedId) return;
         const focused = document.getElementById(focusedId);
         focused?.focus();
@@ -1575,7 +1610,19 @@ function startChatStream(text) {
             currentPartKey,
             type: String(message?.type || "")
         }, `chat-stream:${messageId}:${message?.type || ""}`);
+        if (message.type === "queued") {
+            if (state.chatStreaming && String(state.chatStreaming.messageId) === messageId) {
+                state.chatStreaming.queued = true;
+                state.chatStreaming.queuePosition = Number(message.position || 0);
+                render();
+            }
+            return;
+        }
         if (message.type === "delta") {
+            // 流式过程中状态可能被分 P 切换 / 轮询重置，这里必须判空，否则监听器会静默抛错。
+            if (!state.chatStreaming) return;
+            state.chatStreaming.queued = false;
+            document.querySelector(".chat-stream-hint")?.remove();
             state.chatStreaming.answer += String(message.delta || "");
             const answerNode = document.querySelector('[data-streaming-answer="true"] .chat-item');
             if (answerNode) {
@@ -1610,15 +1657,42 @@ function startChatStream(text) {
             return;
         }
         if (message.type === "error") {
-            state.error = message.error || "聊天失败";
+            const failedQuestion = String(state.chatStreaming?.question || "");
+            const failedMessage = message.error || "聊天失败";
+            state.error = failedMessage;
+            // 同步写入任务状态，让聊天页能渲染带「重试」按钮的错误卡片；
+            // 否则轮询拿到的 taskStatus 仍是 processing / idle，卡片不出现。
+            state.tabState = {
+                ...(state.tabState || {}),
+                taskStatus: { ...(state.tabState?.taskStatus || {}), chat: "error" },
+                taskErrors: {
+                    ...(state.tabState?.taskErrors || {}),
+                    chat: {
+                        code: String(message.code || "CHAT_FAILED"),
+                        message: failedMessage
+                    }
+                },
+                lastError: failedMessage
+            };
             state.chatStreaming = null;
             state.chatPort = null;
             port.disconnect();
-            refreshState({ quiet: true });
+            render();
+            if (failedQuestion) state.chatDraft = failedQuestion;
+            refreshState({ quiet: true }).catch(() => {});
         }
     });
     port.onDisconnect.addListener(() => {
         if (state.chatPort === port) state.chatPort = null;
+        // 后台被回收 / 端口异常断开时，原来会永远停在"正在回答"。
+        // 这里把界面复位并给出明确错误，避免无声挂起。
+        if (state.chatStreaming && String(state.chatStreaming.messageId) === messageId) {
+            const failedQuestion = String(state.chatStreaming.question || "");
+            state.chatStreaming = null;
+            state.error = state.error || "聊天连接已断开，请重试";
+            if (failedQuestion) state.chatDraft = failedQuestion;
+            render();
+        }
     });
     port.postMessage({
         action: "RUN_CHAT_STREAM",

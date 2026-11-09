@@ -25,3 +25,6 @@ social-card-bilitato-xhs/
 outputs/
 scripts/ensure-codex-mobile.ps1
 model-catalog-report.json
+
+# 工作区记忆与本地会话数据，不入库
+.workbuddy/

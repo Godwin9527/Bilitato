@@ -836,6 +836,28 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
         }
         consumeOpenAISsePart(part);
     };
+    // 部分中转 / 自建网关会忽略 stream:true，直接返回整包 JSON。
+    // 这类响应用 SSE 解析拿不到任何 token，这里按各 provider 的完整响应结构兜底提取一次。
+    const extractNonSseBodyText = (raw) => {
+        const source = String(raw || "").trim().replace(/^data:\s*/i, "");
+        if (!source || !/^[[{]/.test(source)) return "";
+        let parsed;
+        try {
+            parsed = JSON.parse(source);
+        } catch (_) {
+            return "";
+        }
+        if (Array.isArray(parsed)) {
+            return parsed.map((item) => extractNonSseBodyText(JSON.stringify(item))).join("");
+        }
+        if (req.provider.type === "google") return extractGeminiText(parsed);
+        if (isClaudeRequest(req)) {
+            return Array.isArray(parsed?.content)
+                ? parsed.content.map((item) => item?.text || "").join("\n").trim()
+                : "";
+        }
+        return extractOpenAIMessageText(parsed) || String(parsed?.output_text || "").trim();
+    };
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -850,6 +872,19 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
             }
         }
     if (buffer.trim()) consumeSsePart(buffer);
+    if (!fullText.trim() && buffer.trim()) {
+        const nonSseText = extractNonSseBodyText(buffer);
+        if (nonSseText) {
+            appendRawResponse(buffer);
+            getProviderLogger()?.debug("provider_stream_non_sse_fallback", {
+                task: "ai",
+                provider: providerKey,
+                model: req.model || "",
+                detail: { text_chars: nonSseText.length }
+            });
+            emitToken(nonSseText);
+        }
+    }
     return {
         text: fullText,
         headers: res.headers,

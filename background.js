@@ -1104,7 +1104,11 @@ async function submitFeedbackFromContent(msg, sender) {
     return fetchFeedbackState(settings, { force: true });
 }
 
-const MAX_GLOBAL_CONCURRENCY = 1;
+// AI 请求分两条通道：
+// - heavy：总结 / 分段 / 验真 / 转写等重任务，允许并行 2 个，让总结与分段真正同时跑；
+// - chat：聊天独占一条通道，永远不会被长任务堵在队列里。
+const MAX_HEAVY_CONCURRENCY = 2;
+const MAX_CHAT_CONCURRENCY = 1;
 const TASK_TIMEOUT_MS = 60000;
 const ASR_TASK_TIMEOUT_MS = 120000;
 const EFFICIENCY_TASK_TIMEOUT_MS = 120000;
@@ -1187,8 +1191,10 @@ const LEGACY_MODELSCOPE_MODELS = new Set([
     "deepseek-ai/DeepSeek-V4-Flash"
 ]);
 
-const queue = [];
-let activeCount = 0;
+const queueLanes = {
+    heavy: { queue: [], activeCount: 0, concurrency: MAX_HEAVY_CONCURRENCY },
+    chat: { queue: [], activeCount: 0, concurrency: MAX_CHAT_CONCURRENCY }
+};
 const inFlight = new Map();
 const globalLogs = [];
 const MAX_LOGS = 2000;
@@ -2027,6 +2033,13 @@ chrome.runtime.onConnect.addListener((port) => {
                 task: "chat",
                 messageId: msg?.messageId || ""
             });
+            // 早期失败（缺 tabId / 字幕未就绪 / 配置缺失）在 runChatForPort 的 try 之外抛出，
+            // 不会写 taskStatus，侧边栏因此看不到任何错误。这里统一补一条，保证错误可见。
+            const failedTabId = Number(msg?.tabId || 0);
+            if (failedTabId) {
+                void setTaskStatus(failedTabId, ["chat"], "error", error?.message || "聊天失败")
+                    .catch(() => {});
+            }
             safePortPost(port, {
                 type: "error",
                 messageId: String(msg?.messageId || ""),
@@ -5401,7 +5414,18 @@ async function runChatForPort(port, msg) {
     chatAbortControllers.set(abortKey, abortController);
     const startedAt = Date.now();
     const taskId = createUsageTaskId("chat");
-    logBackground.info("task_enqueue", { tab_id: tabId, bvid, tasks: ["chat_stream"] });
+    // 聊天走独立通道：即使总结 / 分段正在跑，也不会被堵住。
+    // 若同一时刻已有聊天在跑（极少见），先告诉侧边栏"在排队"，避免界面无声等待。
+    const chatQueueSnapshot = getQueueSnapshot("chat");
+    if (chatQueueSnapshot.activeCount >= chatQueueSnapshot.concurrency || chatQueueSnapshot.queueSize > 0) {
+        safePortPost(port, {
+            type: "queued",
+            messageId,
+            partKey: identity.partKey,
+            position: chatQueueSnapshot.activeCount + chatQueueSnapshot.queueSize
+        });
+    }
+    logBackground.info("task_enqueue", { tab_id: tabId, bvid, tasks: ["chat_stream"], queue_lane: "chat" });
     logBackground.info("task_start", { tab_id: tabId, bvid, task: "chat_stream" });
     await reportClientUsageEvent({
         eventName: "task_started",
@@ -5430,11 +5454,34 @@ async function runChatForPort(port, msg) {
                 streamedAnswerText += chunk;
                 safePortPost(port, { type: "delta", messageId, partKey: identity.partKey, delta: chunk });
 
-            }, abortController, { tabId, component: "chat", bvid });
+            }, abortController, { tabId, component: "chat", bvid, queueLane: "chat" });
             lastMetrics = aiRes.metrics || null;
             await appendMetrics(bvid, tabId, "chat", aiRes.metrics, identity);
             await reportFeatureUsage("chat", bvid, resolvedSettings, aiRes.metrics);
-            return String(aiRes.text || streamedAnswerText || "").trim();
+            let answer = String(aiRes.text || streamedAnswerText || "").trim();
+            if (!answer) {
+                // 部分中转 API 会忽略 stream:true，直接返回整包 JSON，流式解析器拿不到任何 delta。
+                // 这里降级为非流式补一次，避免"成功但空白"。
+                logAI.warn("chat_stream_empty_fallback", {
+                    task: "chat_stream",
+                    provider: resolvedSettings?.provider || "",
+                    model: resolvedSettings?.model || "",
+                    detail: { bvid, message_id: messageId }
+                });
+                const fallback = await callAIWithTimeout(resolvedSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, {
+                    tabId,
+                    component: "chat_fallback",
+                    bvid,
+                    queueLane: "chat"
+                });
+                answer = String(fallback?.text || "").trim();
+                if (answer) {
+                    lastMetrics = fallback?.metrics || lastMetrics;
+                    safePortPost(port, { type: "delta", messageId, partKey: identity.partKey, delta: answer });
+                }
+            }
+            if (!answer) throw createAppError("AI_EMPTY_RESPONSE", "模型没有返回任何内容，请稍后重试或更换模型");
+            return answer;
         });
         const mergedHistory = [
             ...history,
@@ -9198,8 +9245,10 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
 async function callAIWithTimeoutOnce(settings, messages, timeoutMs, options = {}) {
     const controller = new AbortController();
     const unregister = registerTabAbortController(options?.tabId, controller);
-    const queueSizeAtStart = queue.length;
-    const activeCountAtStart = activeCount;
+    const queueLaneName = resolveQueueLaneName(options?.queueLane);
+    const queueSnapshotAtStart = getQueueSnapshot(queueLaneName);
+    const queueSizeAtStart = queueSnapshotAtStart.queueSize;
+    const activeCountAtStart = queueSnapshotAtStart.activeCount;
     const timing = createProviderRequestTiming({ controller, timeoutMs });
     try {
         const requestRunner = () => {
@@ -9210,6 +9259,7 @@ async function callAIWithTimeoutOnce(settings, messages, timeoutMs, options = {}
                 model: settings.model || "",
                 duration_ms: requestTiming.queueWaitMs || 0,
                 detail: {
+                    queue_lane: queueLaneName,
                     queue_wait_ms: requestTiming.queueWaitMs || 0,
                     queue_size_at_start: queueSizeAtStart,
                     active_count_at_start: activeCountAtStart,
@@ -9218,7 +9268,7 @@ async function callAIWithTimeoutOnce(settings, messages, timeoutMs, options = {}
             });
             return callAI(settings.provider, settings, messages, controller.signal);
         };
-        const res = options?.bypassQueue ? await requestRunner() : await runQueued(requestRunner);
+        const res = options?.bypassQueue ? await requestRunner() : await runQueued(requestRunner, queueLaneName);
         const requestTiming = timing.snapshot();
         const latencyMs = requestTiming.providerRequestMs || 0;
         const tokenInfo = resolveTokenInfo(res.usage, res.text, messages);
@@ -9337,8 +9387,10 @@ async function callAIWithTimeoutStreamOnce(settings, messages, timeoutMs, onDelt
     let firstResponseReceived = false;
     const retryDelaysMs = [STREAM_INITIAL_RETRY_DELAY_MS];
     const maxAttempts = retryDelaysMs.length + 1;
-    const queueSizeAtStart = queue.length;
-    const activeCountAtStart = activeCount;
+    const queueLaneName = resolveQueueLaneName(options?.queueLane);
+    const queueSnapshotAtStart = getQueueSnapshot(queueLaneName);
+    const queueSizeAtStart = queueSnapshotAtStart.queueSize;
+    const activeCountAtStart = queueSnapshotAtStart.activeCount;
     const timing = createProviderRequestTiming({
         controller,
         timeoutMs,
@@ -9365,6 +9417,7 @@ async function callAIWithTimeoutStreamOnce(settings, messages, timeoutMs, onDelt
                             duration_ms: requestTiming.queueWaitMs || 0,
                             detail: {
                                 request_stream: true,
+                                queue_lane: queueLaneName,
                                 queue_wait_ms: requestTiming.queueWaitMs || 0,
                                 queue_size_at_start: queueSizeAtStart,
                                 active_count_at_start: activeCountAtStart
@@ -9372,7 +9425,7 @@ async function callAIWithTimeoutStreamOnce(settings, messages, timeoutMs, onDelt
                         });
                     }
                     return callAIStream(settings.provider, settings, messages, controller.signal, wrappedOnDelta);
-                });
+                }, queueLaneName);
                 break;
             } catch (error) {
                 decorateStreamRetryMetadata(error, attempt, maxAttempts, retryDelaysMs);
@@ -9585,25 +9638,50 @@ function safePortPost(port, payload) {
     } catch (_) {}
 }
 
-function runQueued(taskFn) {
+function resolveQueueLaneName(lane) {
+    return lane === "chat" ? "chat" : "heavy";
+}
+
+function getQueueLane(lane) {
+    return queueLanes[resolveQueueLaneName(lane)];
+}
+
+function getQueueSnapshot(lane) {
+    const target = getQueueLane(lane);
+    return {
+        queueSize: target.queue.length,
+        activeCount: target.activeCount,
+        concurrency: target.concurrency
+    };
+}
+
+function runQueued(taskFn, lane = "heavy") {
+    const laneName = resolveQueueLaneName(lane);
+    const target = getQueueLane(laneName);
     return new Promise((resolve, reject) => {
-        queue.push({ taskFn, resolve, reject });
-        logBackground.debug("task_enqueue", { queue_size: queue.length, active_count: activeCount });
-        flushQueue();
+        target.queue.push({ taskFn, resolve, reject });
+        logBackground.debug("task_enqueue", {
+            queue_lane: laneName,
+            queue_size: target.queue.length,
+            active_count: target.activeCount
+        });
+        flushQueue(laneName);
     });
 }
 
-function flushQueue() {
-    while (activeCount < MAX_GLOBAL_CONCURRENCY && queue.length) {
-        const next = queue.shift();
-        activeCount += 1;
+function flushQueue(lane = "heavy") {
+    const laneName = resolveQueueLaneName(lane);
+    const target = getQueueLane(laneName);
+    while (target.activeCount < target.concurrency && target.queue.length) {
+        const next = target.queue.shift();
+        target.activeCount += 1;
         Promise.resolve()
             .then(() => next.taskFn())
             .then((result) => next.resolve(result))
             .catch((error) => next.reject(error))
             .finally(() => {
-                activeCount -= 1;
-                flushQueue();
+                target.activeCount -= 1;
+                flushQueue(laneName);
             });
     }
 }

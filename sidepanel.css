@@ -2392,3 +2392,44 @@ button {
 .ai-summary-plugin-box[data-theme="dark"] .guide-dot.active {
     background: #fb7299;
 }
+
+/* 分段生成状态徽标：让"分段已经好了"这件事在页面上可见 */
+.segments-status-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: #f1f2f4;
+    color: #9499a0;
+    font-size: 11px;
+    line-height: 16px;
+    vertical-align: 1px;
+    white-space: nowrap;
+}
+
+.segments-status-badge.is-loading {
+    background: #fdeef3;
+    color: #fb7299;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .segments-status-badge {
+    background: #2a2f38;
+    color: #a4acb9;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .segments-status-badge.is-loading {
+    background: rgba(251, 114, 153, 0.18);
+    color: #fb7299;
+}
+
+/* 聊天流的排队 / 思考提示 */
+.chat-stream-hint {
+    flex-shrink: 0;
+    padding: 6px 16px 2px;
+    color: #9499a0;
+    font-size: 12px;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .chat-stream-hint {
+    color: #a4acb9;
+}

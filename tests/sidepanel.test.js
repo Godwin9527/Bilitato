@@ -17,6 +17,7 @@ const inject = readFileSync(new URL("../inject.js", import.meta.url), "utf8").re
 const videoCacheCidMigration = readFileSync(new URL("../supabase/migrations/20260710095455_add_cid_isolation_to_video_cache.sql", import.meta.url), "utf8");
 const controlledVideoCacheMigration = readFileSync(new URL("../supabase/migrations/20260805185947_add_controlled_video_cache_upsert.sql", import.meta.url), "utf8");
 const announcementsMigration = readFileSync(new URL("../supabase/migrations/20260807203733_add_extension_announcements.sql", import.meta.url), "utf8");
+const providerAdapter = readFileSync(new URL("../utils/providerAdapter.js", import.meta.url), "utf8");
 
 describe("native side panel", () => {
   it("declares the Chrome side panel entry and permissions", () => {
@@ -79,8 +80,22 @@ describe("native side panel", () => {
     expect(sidepanel).not.toContain('command: "set-embedded-visible"');
   });
 
+  it("keeps chat on a dedicated queue lane and surfaces chat failures", () => {
+    expect(background).toContain("const MAX_HEAVY_CONCURRENCY = 2;");
+    expect(background).toContain("const MAX_CHAT_CONCURRENCY = 1;");
+    expect(background).toContain('queueLane: "chat"');
+    expect(background).toContain("function resolveQueueLaneName(lane)");
+    expect(background).toContain('createAppError("AI_EMPTY_RESPONSE"');
+    expect(background).toContain('callAIWithTimeout(resolvedSettings, [{ role: "user", content: prompt }]');
+    expect(providerAdapter).toContain("provider_stream_non_sse_fallback");
+    expect(sidepanel).toContain("hasTaskFailure");
+    expect(sidepanel).toContain("chat-stream-hint");
+    expect(sidepanel).toContain("聊天连接已断开，请重试");
+    expect(sidepanel).toContain("segments-status-badge");
+  });
+
   it("checks database driven update availability without frequent polling", () => {
-    expect(manifest.version).toBe("1.6.4.2");
+    expect(manifest.version).toBe("1.6.4.3");
     expect(background).toContain('msg.action === "CHECK_LATEST_VERSION"');
     expect(background).toContain('msg.action === "OPEN_EXTENSION_MANAGEMENT"');
     expect(background).toContain("VERSION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000");

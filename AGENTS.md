@@ -59,11 +59,19 @@ Bilitato 是 MV3 扩展，页面侧与侧边栏侧曾各有一套 UI。自 1.6.4
 - 该仓库文件为 LF，Windows 上 `core.autocrlf=true`；用工具批量改写文件后务必确认行尾未被整体改成 CRLF，否则 git diff 会变成整文件重写、测试里的多行断言也会失败。
 - 侧边栏长任务（流式总结、ASR 转录、聊天）依赖常驻上下文，`popup` 形态会因失焦销毁而中断，入口应始终是 side panel。
 
+### AI 请求队列（1.6.4.3 起）
+
+- `queueLanes` 分两条通道：`heavy`（总结/分段/验真/转写，并发 2）与 `chat`（并发 1，独立）。`runQueued(taskFn, lane)` 第二个参数决定通道，缺省 `heavy`。
+- 聊天调用必须带 `{ queueLane: "chat" }`，否则会掉回 heavy 通道，被长任务堵住——这是 1.6.4.2 聊天"发出去没回复"的根因。
+- 侧边栏 `refreshState` 不再无条件清空 `state.error`：只有相关任务不再处于 error/timeout、且没有进行中的聊天流时才清。
+- 聊天流失败会同时写 `taskStatus.chat=error` + `taskErrors.chat`，`taskErrorHtml("chat")` 才有内容可渲染；端口异常断开时 `onDisconnect` 复位界面并提示重试。
+- `callAIStream` 对"忽略 `stream:true`、直接返回整包 JSON"的网关做了非 SSE 兜底（`extractNonSseBodyText`）；仍为空则 `runChatForPort` 降级非流式重试一次，最后才抛 `AI_EMPTY_RESPONSE`。
+
 ## 命令
 
 ```bash
 npm install          # 首次；国内网络可加 --registry=https://registry.npmmirror.com
-npm test             # vitest run，45 个文件 / 363 个用例
+npm test             # vitest run，45 个文件 / 364 个用例
 npm run build:release
 npm run build:firefox
 ```
@@ -71,6 +79,7 @@ npm run build:firefox
 ## 已完成
 
 - 1.6.4.2：移除页面注入 UI，功能全部收口到侧边栏（详见上表与熔断机制）；公告中心、使用引导迁入侧边栏；新增「页面内辅助显示」开关；移除 `switch-to-embedded` 交互。
+- 1.6.4.3：修复聊天无回复与分段感知差。AI 请求拆双通道（heavy 并发 2 / chat 独立 1）；错误不再被轮询抹掉并落到聊天错误卡片；端口断开可复位；空流降级非流式重试 + 非 SSE 响应兜底；分段加状态徽标、完成自动滚动与导航红点。
 
 ## 当前状态
 
