@@ -273,7 +273,22 @@ function isBiliTab(tab) {
     return /^https:\/\/www\.bilibili\.com\/(video|list)\//i.test(String(tab?.url || ""));
 }
 
+// 面板以 iframe 形式嵌在页面里时，URL 会带 ?tabId=，必须锁定到宿主标签页；
+// 否则切到别的标签页时轮询会把内容刷成新标签页的视频。
+const HOST_TAB_ID = (() => {
+    try {
+        const value = Number(new URLSearchParams(location.search).get("tabId") || 0);
+        return Number.isFinite(value) && value > 0 ? value : 0;
+    } catch (_) {
+        return 0;
+    }
+})();
+
 async function getActiveTab() {
+    if (HOST_TAB_ID) {
+        const tab = await chrome.tabs.get(HOST_TAB_ID).catch(() => null);
+        return tab && isBiliTab(tab) ? tab : null;
+    }
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     return tabs.find(isBiliTab) || null;
 }
@@ -1292,7 +1307,7 @@ function renderSetupGuide() {
         },
         4: {
             title: "Tips：入口都在这儿",
-            desc: "Bilitato 不再往页面里塞任何面板。需要字幕、总结、聊天时，点击浏览器工具栏的 Bilitato 图标就能唤起侧边栏。"
+            desc: "Bilitato 默认不往页面里加任何东西。点击浏览器工具栏的 Bilitato 图标，面板会以浮窗形式出现在当前页面右侧；点标题条上的「−」收成悬浮球，点「×」彻底关闭。"
         }
     };
     const body = bodies[step] || bodies[1];
@@ -2398,7 +2413,10 @@ chrome.runtime.onMessage.addListener((message) => {
     return false;
 });
 
-chrome.tabs.onActivated.addListener(() => refreshState({ quiet: true }));
+chrome.tabs.onActivated.addListener(() => {
+    if (HOST_TAB_ID) return;
+    refreshState({ quiet: true });
+});
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (tabId === state.tabId && (changeInfo.url || changeInfo.status === "complete")) {
         refreshState({ quiet: true });

@@ -81,7 +81,6 @@ const ASR_PAGE_FETCH_MAX_CHUNKS = 512;
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const FIREFOX_OFFSCREEN_IFRAME_ID = "bilitato-firefox-offscreen-document";
 let offscreenDocumentPromise = null;
-let firefoxActionClickRegistered = false;
 const MAX_ASR_BOUNDARY_DIAGNOSTICS = 8;
 const USAGE_EVENT_SESSION_ID = createUsageEventSessionId();
 const VERSION_CHECK_STORAGE_KEY = "latestVersionState";
@@ -1919,25 +1918,69 @@ async function tryModelScopeFallback(settings, options, triggerError, runFallbac
     throw fallbackError;
 }
 
-function enableSidePanelActionClick() {
-    if (chrome.sidePanel?.setPanelBehavior) {
-        chrome.sidePanel
-            .setPanelBehavior({ openPanelOnActionClick: true })
-            .catch((error) => logBackground.warn("side_panel_action_behavior_failed", { error: error?.message || String(error) }));
-        return;
+let floatPanelClickRegistered = false;
+
+function flashActionBadge(tabId) {
+    const id = Number(tabId || 0);
+    if (!id) return;
+    try {
+        Promise.resolve(chrome.action.setBadgeBackgroundColor({ tabId: id, color: "#fb7299" })).catch(() => {});
+        Promise.resolve(chrome.action.setBadgeText({ tabId: id, text: "!" })).catch(() => {});
+        setTimeout(() => {
+            try {
+                Promise.resolve(chrome.action.setBadgeText({ tabId: id, text: "" })).catch(() => {});
+            } catch (_) {}
+        }, 1600);
+    } catch (_) {}
+}
+
+function isInjectablePage(url) {
+    const value = String(url || "");
+    if (!/^https?:\/\//i.test(value)) return false;
+    return !/^https?:\/\/(chrome\.google\.com\/webstore|chromewebstore\.google\.com)/i.test(value);
+}
+
+async function toggleFloatPanel(tab) {
+    const tabId = Number(tab?.id || 0);
+    if (!tabId) return { ok: false, error: "无法确定当前标签页" };
+    if (!isInjectablePage(tab?.url)) {
+        flashActionBadge(tabId);
+        return { ok: false, error: "当前页面不支持打开面板" };
     }
-    if (!chrome.sidebarAction?.open || !chrome.action?.onClicked || firefoxActionClickRegistered) return;
-    firefoxActionClickRegistered = true;
-    chrome.action.onClicked.addListener(() => {
-        chrome.sidebarAction.open()
-            .catch((error) => logBackground.warn("sidebar_action_open_failed", { error: error?.message || String(error) }));
+    try {
+        // 先把标签页 id 交给页面脚本，iframe 才知道该显示哪个视频
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            args: [tabId],
+            func: (id) => {
+                globalThis.__bilitatoFloatPanelTabId = id;
+            }
+        });
+        await chrome.scripting.executeScript({ target: { tabId }, files: ["panelHost.js"] });
+        return { ok: true, tabId };
+    } catch (error) {
+        logBackground.warn("float_panel_inject_failed", {
+            error: error?.message || String(error),
+            tab_id: tabId
+        });
+        flashActionBadge(tabId);
+        return { ok: false, error: error?.message || "无法在当前页面打开面板" };
+    }
+}
+
+function registerActionClick() {
+    if (floatPanelClickRegistered || !chrome.action?.onClicked) return;
+    floatPanelClickRegistered = true;
+    chrome.action.onClicked.addListener((tab) => {
+        void toggleFloatPanel(tab);
     });
 }
 
-enableSidePanelActionClick();
+registerActionClick();
+
 
 chrome.runtime.onInstalled.addListener(async (details = {}) => {
-    enableSidePanelActionClick();
+    registerActionClick();
     const { settings } = await chrome.storage.local.get(["settings"]);
     const normalized = normalizeSettings(settings);
     await chrome.storage.local.set({ settings: normalized });
@@ -2103,19 +2146,15 @@ chrome.downloads.onDeterminingFilename?.addListener((item, suggest) => {
 });
 
 async function handleMessage(msg, sender) {
-    if (msg.action === "OPEN_SIDE_PANEL") {
+    if (msg.action === "OPEN_SIDE_PANEL" || msg.action === "TOGGLE_FLOAT_PANEL") {
         const tabId = Number(msg.tabId || sender?.tab?.id || 0);
         if (!tabId) throw new Error("无法确定当前标签页");
-        if (chrome.sidePanel?.open) {
-            return chrome.sidePanel.open({ tabId }).then(() => ({ tabId }));
-        }
-        if (chrome.sidebarAction?.open) {
-            return { tabId, requiresToolbarAction: true };
-        }
-        throw new Error("当前浏览器不支持侧边栏");
+        const tab = await chrome.tabs.get(tabId).catch(() => null);
+        return toggleFloatPanel(tab || { id: tabId, url: sender?.tab?.url || "" });
     }
     if (msg.action === "OPEN_EXTENSION_MANAGEMENT") {
-        const url = chrome.sidebarAction ? "about:addons" : "chrome://extensions/";
+        const isFirefox = /Firefox\//i.test(navigator.userAgent || "");
+        const url = isFirefox ? "about:addons" : "chrome://extensions/";
         await chrome.tabs.create({ url, active: true });
         return {};
     }

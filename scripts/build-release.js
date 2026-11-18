@@ -54,6 +54,7 @@ const files = [
   "sidepanel.html",
   "sidepanel.css",
   "sidepanel.js",
+  "panelHost.js",
   "rules.json",
   "subtitleProcessor.js"
 ];
@@ -98,15 +99,10 @@ function createTargetManifest(target) {
   const targetManifest = JSON.parse(JSON.stringify(manifest));
   if (target !== "firefox") return targetManifest;
 
+  // 面板改为页面内浮层后，Firefox 不再需要 sidebar_action
   targetManifest.permissions = (targetManifest.permissions || [])
     .filter((permission) => permission !== "offscreen" && permission !== "sidePanel");
   delete targetManifest.side_panel;
-  targetManifest.sidebar_action = {
-    default_title: targetManifest.action?.default_title || targetManifest.name,
-    default_panel: "sidepanel.html",
-    default_icon: targetManifest.action?.default_icon || targetManifest.icons,
-    open_at_install: false
-  };
   targetManifest.background = {
     scripts: ["background.js"],
     type: "module"

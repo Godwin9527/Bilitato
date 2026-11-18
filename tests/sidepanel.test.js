@@ -10,6 +10,7 @@ const content = readFileSync(new URL("../content.js", import.meta.url), "utf8");
 const contentCss = readFileSync(new URL("../content.css", import.meta.url), "utf8");
 const releaseNotice = readFileSync(new URL("../content/contentReleaseNotice.js", import.meta.url), "utf8");
 const sidepanel = readFileSync(new URL("../sidepanel.js", import.meta.url), "utf8");
+const panelHost = readFileSync(new URL("../panelHost.js", import.meta.url), "utf8");
 const sidepanelHtml = readFileSync(new URL("../sidepanel.html", import.meta.url), "utf8");
 const sidepanelCss = readFileSync(new URL("../sidepanel.css", import.meta.url), "utf8");
 const offscreen = readFileSync(new URL("../offscreen.js", import.meta.url), "utf8");
@@ -19,12 +20,12 @@ const controlledVideoCacheMigration = readFileSync(new URL("../supabase/migratio
 const announcementsMigration = readFileSync(new URL("../supabase/migrations/20260807203733_add_extension_announcements.sql", import.meta.url), "utf8");
 const providerAdapter = readFileSync(new URL("../utils/providerAdapter.js", import.meta.url), "utf8");
 
-describe("native side panel", () => {
-  it("declares the Chrome side panel entry and permissions", () => {
-    expect(manifest.permissions).toContain("sidePanel");
-    expect(manifest.permissions).toContain("webRequest");
+describe("in-page float panel", () => {
+  it("declares the in-page float panel entry and permissions", () => {
+    expect(manifest.permissions).toContain("activeTab");
+    expect(manifest.permissions).not.toContain("sidePanel");
     expect(manifest.permissions).not.toContain("tabs");
-    expect(manifest.side_panel?.default_path).toBe("sidepanel.html");
+    expect(manifest.side_panel).toBeUndefined();
     expect(manifest.host_permissions).toContain("*://*.bilibili.com/*");
     expect(manifest.host_permissions).not.toContain("https://api.bilibili.com/*");
   });
@@ -40,6 +41,7 @@ describe("native side panel", () => {
     expect(buildScript).toContain('"sidepanel.html"');
     expect(buildScript).toContain('"sidepanel.css"');
     expect(buildScript).toContain('"sidepanel.js"');
+    expect(buildScript).toContain('"panelHost.js"');
     expect(buildScript).toContain('"vendor"');
   });
 
@@ -57,7 +59,9 @@ describe("native side panel", () => {
   it("connects opening, state reads, and page actions", () => {
     expect(background).toContain('msg.action === "OPEN_SIDE_PANEL"');
     expect(background).toContain('msg.action === "CLEAR_TASK_ERRORS"');
-    expect(background).toContain("setPanelBehavior({ openPanelOnActionClick: true })");
+    expect(background).toContain('chrome.action.onClicked.addListener');
+    expect(background).toContain('files: ["panelHost.js"]');
+    expect(background).not.toContain("setPanelBehavior");
     expect(content).toContain('"SIDE_PANEL_CONTENT_ACTION"');
     expect(sidepanel).toContain('action: "GET_BOOTSTRAP"');
     expect(sidepanel).toContain('action: "RUN_TASKS"');
@@ -67,17 +71,32 @@ describe("native side panel", () => {
     expect(sidepanel).toContain('action: "SAVE_SETTINGS"');
   });
 
-  it("keeps the page free of injected UI and routes everything to the side panel", () => {
+  it("keeps the page free of injected UI until the toolbar icon is clicked", () => {
     expect(content).toContain("const PAGE_EMBEDDED_PANEL_DISABLED = true");
     expect(content).toContain("function isPagePanelEnabled()");
     expect(content).toContain("if (!isPagePanelEnabled()) return;");
     expect(content).toContain("function isPageOverlayEnabled()");
     expect(content).toContain("function syncPageOverlayStyles(");
     expect(manifest.content_scripts[0].css).toBeUndefined();
-    expect(manifest.side_panel.default_path).toBe("sidepanel.html");
-    expect(background).toContain("openPanelOnActionClick: true");
+    expect(manifest.content_scripts[0].js.some((file) => file.includes("panelHost.js"))).toBe(false);
+    expect(manifest.side_panel).toBeUndefined();
     expect(sidepanel).not.toContain('data-action="switch-to-embedded"');
     expect(sidepanel).not.toContain('command: "set-embedded-visible"');
+  });
+
+  it("hosts the panel inside the page with a draggable window and a collapsible ball", () => {
+    expect(panelHost).toContain("__bilitatoFloatPanelHost");
+    expect(panelHost).toContain("window[HOST_KEY].toggle()");
+    expect(panelHost).toContain('attachShadow({ mode: "open" })');
+    expect(panelHost).toContain("chrome.runtime.getURL(\"sidepanel.html\")");
+    expect(panelHost).toContain('data-act="collapse"');
+    expect(panelHost).toContain('data-act="close"');
+    expect(panelHost).toContain("floatPanelGeometry");
+    expect(panelHost).toContain("setPointerCapture");
+    expect(panelHost).toContain("is-hidden");
+    expect(manifest.web_accessible_resources.some((entry) => entry.resources.includes("sidepanel.html"))).toBe(true);
+    expect(sidepanel).toContain("HOST_TAB_ID");
+    expect(sidepanel).toContain("chrome.tabs.get(HOST_TAB_ID)");
   });
 
   it("keeps chat on a dedicated queue lane and surfaces chat failures", () => {
@@ -95,7 +114,7 @@ describe("native side panel", () => {
   });
 
   it("checks database driven update availability without frequent polling", () => {
-    expect(manifest.version).toBe("1.6.4.3");
+    expect(manifest.version).toBe("1.6.4.4");
     expect(background).toContain('msg.action === "CHECK_LATEST_VERSION"');
     expect(background).toContain('msg.action === "OPEN_EXTENSION_MANAGEMENT"');
     expect(background).toContain("VERSION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000");
@@ -175,16 +194,15 @@ describe("native side panel", () => {
     expect(releaseLayer).toBeGreaterThan(metricsLayer);
   });
 
-  it("builds a Firefox package with sidebar and background-page compatibility", () => {
+  it("builds a Firefox package with background-page compatibility", () => {
     expect(buildScript).toContain("firefox:");
     expect(buildScript).toContain('permission !== "offscreen" && permission !== "sidePanel"');
     expect(buildScript).toContain("delete targetManifest.side_panel");
-    expect(buildScript).toContain("targetManifest.sidebar_action");
+    expect(buildScript).not.toContain("targetManifest.sidebar_action");
     expect(buildScript).toContain('scripts: ["background.js"]');
     expect(buildScript).toContain('optional: ["technicalAndInteraction"]');
-    expect(background).toContain("chrome.sidebarAction.open()");
+    expect(background).not.toContain("chrome.sidebarAction.open()");
     expect(background).toContain("FIREFOX_OFFSCREEN_IFRAME_ID");
-    expect(content).toContain("result.requiresToolbarAction");
   });
 
   it("ships a reproducible cross-platform Firefox source package", () => {
@@ -861,14 +879,15 @@ describe("native side panel", () => {
     expect(backgroundHandlerIndex).toBeGreaterThan(sidePanelHandlerIndex);
   });
 
-  it("opens the side panel before any awaited setup can consume the click gesture", () => {
-    const branchStart = background.indexOf('if (msg.action === "OPEN_SIDE_PANEL")');
-    const branchEnd = background.indexOf('if (msg.action === "REPORT_ERROR")', branchStart);
+  it("toggles the in-page panel from the OPEN_SIDE_PANEL message branch", () => {
+    const branchStart = background.indexOf('if (msg.action === "OPEN_SIDE_PANEL"');
+    const branchEnd = background.indexOf('if (msg.action === "OPEN_EXTENSION_MANAGEMENT"', branchStart);
     const openBranch = background.slice(branchStart, branchEnd);
 
-    expect(openBranch).toContain("chrome.sidePanel.open({ tabId })");
-    expect(openBranch).not.toContain("await chrome.sidePanel");
-    expect(openBranch).not.toContain("setOptions");
-    expect(openBranch).toContain("requiresToolbarAction: true");
+    expect(branchStart).toBeGreaterThan(0);
+    expect(openBranch).toContain("toggleFloatPanel(");
+    expect(openBranch).not.toContain("chrome.sidePanel");
+    expect(background).toContain("async function toggleFloatPanel(tab)");
+    expect(background).toContain("flashActionBadge(tabId)");
   });
 });

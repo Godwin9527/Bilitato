@@ -40,6 +40,7 @@ const sourceFiles = [
   "sidepanel.css",
   "sidepanel.html",
   "sidepanel.js",
+  "panelHost.js",
   "storeConfig.js",
   "subtitleProcessor.js",
   "vitest.config.js"

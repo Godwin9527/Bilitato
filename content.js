@@ -2637,8 +2637,7 @@ async function waitPanelMount() {
         panel.querySelector("#native-side-panel-btn")?.addEventListener("click", async (event) => {
             event.stopPropagation();
             const result = await chrome.runtime.sendMessage({ action: "OPEN_SIDE_PANEL" });
-            if (!result?.ok) showToast(result?.error || "无法打开浏览器侧边栏");
-            else if (result.requiresToolbarAction) showToast("请点击 Firefox 工具栏中的 Bilitato 图标打开侧边栏");
+            if (!result?.ok) showToast(result?.error || "无法打开 Bilitato 面板");
         });
 
         // Ensure progress bar is hidden initially
