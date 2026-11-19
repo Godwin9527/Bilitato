@@ -98,6 +98,14 @@ npm run build:firefox
 - 1.6.4.2：移除页面注入 UI，功能全部收口到侧边栏（详见上表与熔断机制）；公告中心、使用引导迁入侧边栏；新增「页面内辅助显示」开关；移除 `switch-to-embedded` 交互。
 - 1.6.4.3：修复聊天无回复与分段感知差。AI 请求拆双通道（heavy 并发 2 / chat 独立 1）；错误不再被轮询抹掉并落到聊天错误卡片；端口断开可复位；空流降级非流式重试 + 非 SSE 响应兜底；分段加状态徽标、完成自动滚动与导航红点。
 - 1.6.4.4：UI 从浏览器侧边栏搬回页面，改为按需注入的浮窗 + 悬浮球。新增 `panelHost.js`；manifest 移除 `side_panel` / `sidePanel` 权限、新增 `activeTab` 与 `<all_urls>` 的 WAR；`sidepanel.js` 用 `?tabId=` 锁定宿主标签页；Firefox 不再生成 `sidebar_action`。
+- 1.6.4.5：修复静默抓字幕遮罩残留导致「CC 按钮悬停无反应 + 字幕快捷键失效」。`inject.js` 的 `#bili-stealth-css` 加 4s 硬超时（`STEALTH_MASK_MAX_MS`）、`finishSilentSession` 重试用尽分支补清会话/撤遮罩；遮罩规则从 `visibility:hidden + pointer-events:none` 改为只 `opacity:0`（否则自己都点不中语言项，还原永远失败）；`blindSilentOpen` 改 hover 优先、`click()` 仅兜底；新增真实 `keydown` 守卫即时撤遮罩。版本号在 `tests/sidepanel.test.js` 有硬断言，改版本记得同步。
+
+## 坑（字幕静默抓取）
+
+- 静默抓字幕靠「自动点开 CC → 点中文轨道 → 抓字幕 JSON → 还原成关闭」实现，全程叠一层遮罩。**遮罩一旦泄漏，用户看到的就是"CC 悬停无反应 + 快捷键失效"**，因为菜单被屏蔽、字幕容器被隐藏。
+- 遮罩只能遮视觉，不能加 `visibility:hidden` / `pointer-events:none`：静默流程自己的还原点击会因此落空，形成死循环。
+- 任何新增的静默流程分支都必须保证最终 `removeStealthMask()`，别只依赖"还原成功"这条正常路径。
+- 真机验证脚本在 `D:\tmp\bili-panel-test\`（不进仓库）：`stealth.js` 查遮罩是否回收、`keys.js` 查按键是否即时撤遮罩、`flow.js` 查是否命中中文轨道。**脚本启动 Chrome 必须加 `--mute-audio`**，否则后台实例会真的出声。
 
 ## 当前状态
 

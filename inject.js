@@ -24,7 +24,11 @@
     let manualOverrideRouteKey = "";
     let subtitleDebugEnabled = false;
     let userSubtitlePreference = { mode: "unknown", label: "" };
+    let maskSafetyTimer = null;
     const stealthStyleId = "bili-stealth-css";
+    // 静默抓字幕的遮罩必须有硬超时：任何异常路径都不能让它留在页面上，
+    // 否则字幕菜单被屏蔽（hover 无反应）且字幕容器不可见（快捷键像失效）。
+    const STEALTH_MASK_MAX_MS = 4000;
     const originalFetch = window.fetch;
     const originalOpen = XMLHttpRequest.prototype.open;
     const originalSend = XMLHttpRequest.prototype.send;
@@ -338,20 +342,45 @@
     }
 
     function applyStealthMask() {
-        if (document.getElementById(stealthStyleId)) return;
-        maskNode = document.createElement("style");
-        maskNode.id = stealthStyleId;
-        maskNode.innerHTML = [
-            ".bpx-player-video-subtitle { visibility: hidden !important; }",
-            ".bili-subtitle-x-subtitle-panel-position { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }",
-            ".bpx-player-ctrl-subtitle-menu, .bpx-player-ctrl-subtitle-panel, .bpx-player-dialog-wrap:has(.bpx-player-ctrl-subtitle-language-item-text) { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }",
-            ".bpx-common-toast, .bpx-player-toast-wrap, .bpx-player-toast-row, .bpx-player-toast-auto { display: none !important; opacity: 0 !important; visibility: hidden !important; }"
-        ].join(" ");
-        document.head.appendChild(maskNode);
-        emitLog("subtitle_stealth_applied", { source: "inject" });
+        if (!document.getElementById(stealthStyleId)) {
+            maskNode = document.createElement("style");
+            maskNode.id = stealthStyleId;
+            // 只遮视觉、不阻交互：菜单保留 opacity:0 而不再加 visibility/pointer-events，
+            // 否则静默流程自己都点不到语言项，还原步骤永远失败、遮罩永远撤不掉。
+            maskNode.innerHTML = [
+                ".bpx-player-video-subtitle { visibility: hidden !important; }",
+                ".bili-subtitle-x-subtitle-panel-position { opacity: 0 !important; }",
+                ".bpx-player-ctrl-subtitle-menu, .bpx-player-ctrl-subtitle-panel, .bpx-player-dialog-wrap:has(.bpx-player-ctrl-subtitle-language-item-text) { opacity: 0 !important; }",
+                ".bpx-common-toast, .bpx-player-toast-wrap, .bpx-player-toast-row, .bpx-player-toast-auto { display: none !important; opacity: 0 !important; visibility: hidden !important; }"
+            ].join(" ");
+            document.head.appendChild(maskNode);
+            emitLog("subtitle_stealth_applied", { source: "inject" });
+        }
+        startMaskSafetyTimer();
+    }
+
+    function startMaskSafetyTimer() {
+        if (maskSafetyTimer) clearTimeout(maskSafetyTimer);
+        maskSafetyTimer = setTimeout(() => {
+            maskSafetyTimer = null;
+            const session = silentSession;
+            if (!document.getElementById(stealthStyleId) && !maskNode?.isConnected && !session) return;
+            removeStealthMask();
+            closeSubtitleMenuSilently();
+            if (session?.finishTimer) clearTimeout(session.finishTimer);
+            silentSession = null;
+            // 超时说明静默流程没走完，把页面交还用户，本路由不再自动重试
+            manualOverrideRouteKey = getRouteVideoKey();
+            autoTriggerStarted = true;
+            emitLog("subtitle_stealth_timeout", { routeKey: session?.routeKey || "" });
+        }, STEALTH_MASK_MAX_MS);
     }
 
     function removeStealthMask() {
+        if (maskSafetyTimer) {
+            clearTimeout(maskSafetyTimer);
+            maskSafetyTimer = null;
+        }
         const hadMask = !!document.getElementById(stealthStyleId) || !!maskNode?.isConnected;
         const style = document.getElementById(stealthStyleId);
         if (style) style.remove();
@@ -438,7 +467,11 @@
                 session.finishTimer = setTimeout(() => tryClose(attempt + 1), retryDelays[attempt + 1]);
                 return;
             }
+            // 还原失败也必须收尾：清会话 + 撤遮罩 + 关菜单，否则遮罩会一直留在页面上
+            if (silentSession?.id === session.id) silentSession = null;
+            removeStealthMask();
             closeSubtitleMenuSilently();
+            manualOverrideRouteKey = getRouteVideoKey();
             emitLog("subtitle_stealth_close_pending", { routeKey: session.routeKey, attempts: retryDelays.length });
         };
         tryClose(0);
@@ -448,42 +481,63 @@
         return blindSilentOpen();
     }
 
+    function hasVisibleSubtitleText() {
+        const node = document.querySelector(".bpx-player-video-subtitle");
+        if (!node) return false;
+        return String(node.innerText || node.textContent || "").trim().length > 0;
+    }
+
+    function clickChineseSubtitleTrack() {
+        const allTextDivs = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
+        const chineseTrack = allTextDivs.find((el) => String(el?.innerText || el?.textContent || "").trim().includes("中文"));
+        if (!chineseTrack) return false;
+        try {
+            chineseTrack.click();
+        } catch (_) {
+            return false;
+        }
+        return true;
+    }
+
     function blindSilentOpen() {
         if (isSubtitleCaptured) return;
         const routeKey = getRouteVideoKey();
         if (manualOverrideRouteKey === routeKey) return false;
+        // 用户自己已经开着字幕：字幕 JSON 本来就会下载，走 hook 就能抓到，不要再抢他的播放器
+        if (userSubtitlePreference.mode === "on" || hasVisibleSubtitleText()) return false;
         cancelSilentSession({ releaseMask: false });
-        silentSession = {
+        const session = {
             id: ++silentSessionSeq,
             routeKey,
             finishTimer: null,
             finishing: false,
             restoreClicked: false
         };
+        silentSession = session;
         applyStealthMask();
-        const allTextDivs = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
-        const chineseTrack = allTextDivs.find((el) => String(el?.innerText || "").trim().includes("中文"));
-        if (chineseTrack) {
-            chineseTrack.click();
-            return true;
-        }
+        if (clickChineseSubtitleTrack()) return true;
         const ccBtn = document.querySelector(".bpx-player-ctrl-subtitle");
-        let clicked = false;
-        if (ccBtn) {
+        if (!ccBtn) return false;
+        // 先用 hover 展开菜单（B 站 CC 菜单本来就是 hover 触发），
+        // 不用 click 把菜单锁在打开态，避免它吞掉页面快捷键。
+        ["mouseenter", "mouseover", "mousemove"].forEach((type) => {
             try {
-                const evt = new MouseEvent("mouseenter", { bubbles: true, cancelable: true, view: window });
-                ccBtn.dispatchEvent(evt);
+                ccBtn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
             } catch (_) {}
-            ccBtn.click();
-            clicked = true;
-        }
+        });
         setTimeout(() => {
-            if (isSubtitleCaptured) return;
-            const retryTrack = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"))
-                .find((el) => String(el?.innerText || "").trim().includes("中文"));
-            if (retryTrack) retryTrack.click();
-        }, 100);
-        return clicked;
+            if (isSubtitleCaptured || silentSession?.id !== session.id) return;
+            if (clickChineseSubtitleTrack()) return;
+            // hover 没展开（老播放器/结构差异）才退回 click；最坏情况也被遮罩超时兜住
+            try {
+                ccBtn.click();
+            } catch (_) {}
+            setTimeout(() => {
+                if (isSubtitleCaptured || silentSession?.id !== session.id) return;
+                clickChineseSubtitleTrack();
+            }, 160);
+        }, 180);
+        return true;
     }
 
     function normalizeSubtitleLabel(value) {
@@ -690,6 +744,21 @@
         }, true);
         document.addEventListener("click", (event) => {
             release("click", event);
+        }, true);
+        // 真实按键说明用户正在用播放器快捷键（切字幕等）：立刻撤遮罩、关菜单、放弃静默流程。
+        // 不还原语言，避免扩展在用户按键的同一帧里改写播放器状态。
+        document.addEventListener("keydown", (event) => {
+            if (!event.isTrusted) return;
+            if (!silentSession && !document.getElementById(stealthStyleId)) return;
+            emitLog("subtitle_manual_intervention", { event: "keydown" });
+            manualOverrideRouteKey = getRouteVideoKey();
+            autoTriggerStarted = true;
+            if (autoTriggerTimer) {
+                clearTimeout(autoTriggerTimer);
+                autoTriggerTimer = null;
+            }
+            cancelSilentSession({ restore: false, releaseMask: true });
+            closeSubtitleMenuSilently();
         }, true);
     }
 
